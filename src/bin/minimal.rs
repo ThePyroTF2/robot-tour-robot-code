@@ -7,11 +7,16 @@ use robot_tour_robot_code as _; // global logger + panicking-behavior + memory l
 // TODO(7) Configure the `rtic::app` macro
 #[rtic::app(
     device = stm32f4xx_hal::pac,
-    // TODO: Replace the `FreeInterrupt1, ...` with free interrupt vectors if software tasks are used
-    // You can usually find the names of the interrupt vectors in the some_hal::pac::interrupt enum.
-    dispatchers = [USART1]
+    dispatchers = [USART1, USART2, USART6]
 )]
 mod app {
+    use rtic_monotonics::systick::*;
+    use stm32f4xx_hal::{
+        gpio::{Output, Pin},
+        prelude::*,
+        timer::{Channel1, Channel2, Timer},
+    };
+
     // Shared resources go here
     #[shared]
     struct Shared {
@@ -21,43 +26,55 @@ mod app {
     // Local resources go here
     #[local]
     struct Local {
-        // TODO: Add resources
+        led: Pin<'C', 13, Output>,
     }
 
     #[init]
-    fn init(_cx: init::Context) -> (Shared, Local) {
-        defmt::info!("init");
+    fn init(cx: init::Context) -> (Shared, Local) {
+        let freq = 48.MHz();
+        let dp = cx.device;
+        let rcc = dp.RCC.constrain();
+        let gpioc = dp.GPIOC.split();
+        let gpioa = dp.GPIOA.split();
+        let led = gpioc.pc13.into_push_pull_output();
 
-        // TODO setup monotonic if used
-        // let sysclk = { /* clock setup + returning sysclk as an u32 */ };
-        // let token = rtic_monotonics::create_systick_token!();
-        // rtic_monotonics::systick::Systick::new(cx.core.SYST, sysclk, token);
+        // Setup monotonic
+        let sysclk = rcc.cfgr.sysclk(freq).freeze();
+        let token = rtic_monotonics::create_systick_token!();
+        Systick::start(cx.core.SYST, freq.to_Hz(), token);
 
-        task1::spawn().ok();
+        // Setup PWM
+        let channels = (Channel1::new(gpioa.pa8), Channel2::new(gpioa.pa9));
+        let pwm = Timer::new(dp.TIM1, &sysclk).pwm_hz(channels, 50.Hz());
+        let (mut ch1, _ch2) = pwm.split();
+        let max_duty = ch1.get_max_duty();
+        ch1.set_duty(max_duty / 2);
+        ch1.enable();
+
+        blink::spawn().unwrap();
 
         (
             Shared {
                 // Initialization of shared resources go here
             },
-            Local {
-                // Initialization of local resources go here
-            },
+            Local { led },
         )
     }
 
     // Optional idle, can be removed if not needed.
     #[idle]
     fn idle(_: idle::Context) -> ! {
-        defmt::info!("idle");
-
         loop {
             continue;
         }
     }
 
     // TODO: Add tasks
-    #[task(priority = 1)]
-    async fn task1(_cx: task1::Context) {
-        defmt::info!("Hello from task1!");
+    #[task(priority = 1, local = [led])]
+    async fn blink(cx: blink::Context) {
+        loop {
+            cx.local.led.toggle();
+            Systick::delay(1.secs()).await;
+        }
     }
 }
